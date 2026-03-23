@@ -1,0 +1,16 @@
+﻿pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+xgboost
+imbalanced-learn
+shap
+wandb
+fastapi
+uvicorn
+streamlit
+dvc
+python-dotenv
+jupyter
+ipykernel
