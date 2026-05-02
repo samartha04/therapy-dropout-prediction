@@ -1,6 +1,10 @@
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_APP_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import pickle
 from typing import Any, Dict
@@ -9,13 +13,67 @@ import matplotlib.pyplot as plt  # noqa: F401
 import pandas as pd
 import streamlit as st
 
-from src.evaluate import (
-    compute_risk_score,
-    compute_shap_values,
-    plot_individual_explanation,
-)
+from src.evaluate import (compute_risk_score, compute_shap_values,
+                          plot_individual_explanation)
 
-MODEL_PATH = "models/xgboost_model.pkl"
+MODEL_PATH = os.path.join(_PROJECT_ROOT, "models", "xgboost_model.pkl")
+
+
+def build_patient_features(
+    phq9_score: int,
+    session_number: int,
+    sessions_per_month: float,
+    attendance_consistency: float,
+    days_since_last_session: int,
+    mood_rating: int,
+    patient_age: int,
+    phq9_change_rate: float,
+) -> pd.DataFrame:
+    """
+    Construct a single-patient feature row from UI inputs including
+    engineered features to match the synthetic training pipeline.
+
+    Parameters
+    ----------
+    phq9_score : int
+        Current PHQ-9 depression severity score (0-27).
+    session_number : int
+        Current session index in treatment (1-20).
+    sessions_per_month : float
+        Typical number of sessions per month.
+    attendance_consistency : float
+        Proportion of scheduled sessions attended (0-1).
+    days_since_last_session : int
+        Days since the most recent therapy session.
+    mood_rating : int
+        Subjective mood rating (1-10), higher is better.
+    patient_age : int
+        Patient age in years.
+    phq9_change_rate : float
+        Rate of change in PHQ-9 per session (negative = improving).
+
+    Returns
+    -------
+    pd.DataFrame
+        Single-row DataFrame formatted to match the model's expected features.
+    """
+    features: Dict[str, Any] = {
+        "phq9_score": phq9_score,
+        "session_number": session_number,
+        "session_frequency_per_month": sessions_per_month,
+        "attendance_consistency": attendance_consistency,
+        "gap_between_sessions_days": days_since_last_session,
+        "mood_rating": mood_rating,
+        "age": patient_age,
+        "phq9_change_rate": phq9_change_rate,
+        # Engineered features — must match training pipeline
+        "gap_increasing": 1 if days_since_last_session > 14 else 0,
+        "max_attendance_streak": int(attendance_consistency * session_number),
+        "phq9_change_rate_abs": abs(phq9_change_rate),
+    }
+    print("Features sent to model:")
+    print(pd.DataFrame([features]).to_string())
+    return pd.DataFrame([features])
 
 
 def load_model() -> Any:
@@ -63,61 +121,6 @@ def get_model() -> Any:
         The cached model instance.
     """
     return load_model()
-
-
-def build_patient_features(
-    phq9_score: int,
-    session_number: int,
-    sessions_per_month: float,
-    attendance_consistency: float,
-    days_since_last_session: int,
-    mood_rating: int,
-    patient_age: int,
-    phq9_change_rate: float,
-) -> pd.DataFrame:
-    """
-    Construct a single-patient feature row from UI inputs including
-    engineered features to match the training pipeline.
-
-    Parameters
-    ----------
-    phq9_score : int
-        Current PHQ-9 depression severity score (0-27).
-    session_number : int
-        Current session index in the treatment (1-20).
-    sessions_per_month : float
-        Typical number of sessions per month (frequency of care).
-    attendance_consistency : float
-        Proportion of scheduled sessions attended (0-1).
-    days_since_last_session : int
-        Days since the most recent therapy session.
-    mood_rating : int
-        Subjective mood rating (1-10), higher is better.
-    patient_age : int
-        Patient age in years.
-    phq9_change_rate : float
-        Rate of change in PHQ-9 per session (negative = improving).
-
-    Returns
-    -------
-    pd.DataFrame
-        Single-row DataFrame formatted to match the model's expected features.
-    """
-    features: Dict[str, Any] = {
-        "phq9_score": phq9_score,
-        "session_number": session_number,
-        "session_frequency_per_month": sessions_per_month,
-        "attendance_consistency": attendance_consistency,
-        "gap_between_sessions_days": days_since_last_session,
-        "mood_rating": mood_rating,
-        "age": patient_age,
-        "phq9_change_rate": phq9_change_rate,
-        # Engineered features — must match training pipeline
-        "gap_increasing": 1 if days_since_last_session > 14 else 0,
-        "max_attendance_streak": int(attendance_consistency * session_number),
-        "phq9_change_rate_abs": abs(phq9_change_rate),
-    }
-    return pd.DataFrame([features])
 
 
 def display_risk_result(risk_score: float, risk_tier: str) -> None:
@@ -290,14 +293,12 @@ def main() -> None:
             show_shap_explanation(model, patient_features)
 
     st.markdown("---")
-    st.markdown(
-        """
+    st.markdown("""
         **Ethical Disclaimer**
 
         This is a research prototype. Not intended for clinical use.  
         All predictions are decision support only.
-        """
-    )
+        """)
 
 
 if __name__ == "__main__":

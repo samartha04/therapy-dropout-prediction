@@ -36,7 +36,6 @@ def compute_phq9_change_rate(df: pd.DataFrame) -> pd.DataFrame:
             "DataFrame must contain 'patient_id', 'session_number', and 'phq9_score' columns."
         )
 
-    # Ensure sessions are ordered within each patient
     df_copy = df_copy.sort_values(["patient_id", "session_number"])
 
     def _per_patient_change_rate(group: pd.DataFrame) -> float:
@@ -45,7 +44,6 @@ def compute_phq9_change_rate(df: pd.DataFrame) -> pd.DataFrame:
         first_session = group["session_number"].iloc[0]
         last_session = group["session_number"].iloc[-1]
 
-        # Number of sessions spanned; at least 1 to avoid division by zero
         session_span = max(1, last_session - first_session)
         return (last_score - first_score) / session_span
 
@@ -55,7 +53,6 @@ def compute_phq9_change_rate(df: pd.DataFrame) -> pd.DataFrame:
         .rename("phq9_change_rate")
     )
 
-    # Map per-patient rate back to each row
     df_copy["phq9_change_rate"] = df_copy["patient_id"].map(rates)
 
     return df_copy
@@ -103,15 +100,12 @@ def compute_session_gap_pattern(df: pd.DataFrame) -> pd.DataFrame:
     def _flag_increasing_gaps(group: pd.DataFrame) -> int:
         gaps = group["gap_between_sessions_days"].values
 
-        # If there are fewer than 3 sessions, treat as not enough evidence of a pattern
         if gaps.size < 3:
             return 0
 
-        # Use sign of the mean first difference as a simple increasing/decreasing indicator
         diffs = np.diff(gaps.astype(float))
         mean_diff = np.mean(diffs)
 
-        # Flag as increasing if average change is meaningfully positive
         return int(mean_diff > 0)
 
     flags = (
@@ -190,19 +184,12 @@ def compute_attendance_streak(df: pd.DataFrame) -> pd.DataFrame:
 
 def run_all_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Run the full clinical feature engineering pipeline for dropout prediction.
+    Run the full synthetic psychotherapy feature engineering pipeline.
 
-    This function sequentially applies several clinically motivated feature
-    transformations to psychotherapy session data:
-    1. PHQ-9 change rate: how quickly depression severity improves or worsens.
-    2. Session gap pattern: whether the time between sessions is increasing,
-       which may signal early disengagement.
-    3. Attendance streak: the longest stretch of consistent attendance, capturing
-       sustained engagement in treatment.
-
-    These features are designed to help machine learning models capture
-    clinically meaningful risk and resilience factors related to psychotherapy
-    dropout.
+    Clinically motivated features capture:
+    - symptom trajectory (PHQ-9 change rate)
+    - disengagement signal (increasing gaps between sessions)
+    - engagement resilience (longest consecutive attendance streak)
 
     Parameters
     ----------
@@ -214,14 +201,11 @@ def run_all_features(df: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        A new DataFrame with all engineered features added:
-        - 'phq9_change_rate'
-        - 'gap_increasing'
-        - 'max_attendance_streak'
+        DataFrame with 'phq9_change_rate', 'gap_increasing',
+        'max_attendance_streak' added.
     """
     df_features = compute_phq9_change_rate(df)
     df_features = compute_session_gap_pattern(df_features)
     df_features = compute_attendance_streak(df_features)
 
     return df_features
-

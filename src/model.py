@@ -1,22 +1,40 @@
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 from imblearn.over_sampling import SMOTE
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    classification_report,
-    f1_score,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
+from sklearn.metrics import (classification_report, f1_score, precision_score,
+                             recall_score, roc_auc_score)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from src.data_loader import get_feature_columns
 
-def prepare_data(df: pd.DataFrame) -> Tuple[Any, Any, Any, Any, StandardScaler]:
+
+def _resolve_feature_columns(df: pd.DataFrame) -> List[str]:
+    """
+    Resolve feature columns for synthetic psychotherapy dropout data.
+    Excludes target, identifier and split columns.
+    """
+    exclude = {'dropout', 'patient_id', 'split'}
+    return [c for c in df.columns if c not in exclude]
+
+
+def _should_use_official_split(df: pd.DataFrame) -> bool:
+    """Use AVEC train+dev vs test when a split column from load_daic_woz() is present."""
+    if "split" not in df.columns:
+        return False
+    s = df["split"].astype(str)
+    return bool(s.eq("test").any() and (s.eq("train") | s.eq("dev")).any())
+
+
+def prepare_data(
+    df: pd.DataFrame,
+    feature_columns: Optional[Sequence[str]] = None,
+    use_official_split: Optional[bool] = None,
+) -> Tuple[Any, Any, Any, Any, StandardScaler]:
     """
     Prepare psychotherapy dropout dataset for model training and evaluation.
 
@@ -25,6 +43,13 @@ def prepare_data(df: pd.DataFrame) -> Tuple[Any, Any, Any, Any, StandardScaler]:
     applies standardization to the feature space. Standardizing features helps
     many models (especially linear ones) interpret clinical variables like
     symptom scores and engagement metrics on a comparable scale.
+
+    For DAIC-WOZ data loaded with ``load_daic_woz()``, feature columns default to
+    ``get_feature_columns()`` (PHQ total, gender, PHQ-8 items) and, when a
+    ``split`` column is present, train+dev rows are used for fitting the scaler
+    and training while the held-out ``test`` split is used for evaluation—matching
+    the official AVEC partition. Other datasets keep the prior behavior: every
+    column except ``dropout``, with a random 80/20 stratified split.
 
     The target column is assumed to be:
     - 'dropout': 0 for patients who complete or continue treatment,
@@ -35,6 +60,13 @@ def prepare_data(df: pd.DataFrame) -> Tuple[Any, Any, Any, Any, StandardScaler]:
     df : pd.DataFrame
         Full psychotherapy dataset including the 'dropout' target column and
         any engineered clinical features.
+    feature_columns : sequence of str, optional
+        Explicit feature names. If omitted, resolved via ``get_feature_columns()``
+        when those columns exist in ``df``; otherwise all columns except ``dropout``.
+    use_official_split : bool, optional
+        If True, use ``split`` in ``{'train','dev'}`` for training and ``test`` for
+        evaluation. If False, use a random stratified 80/20 split. If None (default),
+        auto-detect: official split when ``split`` column has train/dev and test rows.
 
     Returns
     -------
@@ -52,12 +84,34 @@ def prepare_data(df: pd.DataFrame) -> Tuple[Any, Any, Any, Any, StandardScaler]:
     if "dropout" not in df.columns:
         raise ValueError("DataFrame must contain a 'dropout' column as the target.")
 
-    X = df.drop(columns=["dropout"])
+    cols = list(feature_columns) if feature_columns is not None else _resolve_feature_columns(df)
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing feature columns in DataFrame: {missing}")
+
+    X = df[cols]
     y = df["dropout"]
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
-    )
+    if use_official_split is None:
+        use_official_split = _should_use_official_split(df)
+
+    if use_official_split:
+        if "split" not in df.columns:
+            raise ValueError("use_official_split=True requires a 'split' column on the DataFrame.")
+        train_mask = df["split"].isin(["train", "dev"])
+        test_mask = df["split"].eq("test")
+        if not train_mask.any():
+            raise ValueError("Official split requested but no rows with split in {'train','dev'}.")
+        if not test_mask.any():
+            raise ValueError("Official split requested but no rows with split == 'test'.")
+        X_train = X.loc[train_mask]
+        X_test = X.loc[test_mask]
+        y_train = y.loc[train_mask]
+        y_test = y.loc[test_mask]
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, stratify=y, random_state=42
+        )
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -99,7 +153,11 @@ def apply_smote(X_train: Any, y_train: Any) -> Tuple[Any, Any]:
     print("Class distribution before SMOTE:")
     print(pd.Series(y_train).value_counts(normalize=False).rename("count"))
     print(
-        pd.Series(y_train).value_counts(normalize=True).mul(100).round(2).rename("pct_%")
+        pd.Series(y_train)
+        .value_counts(normalize=True)
+        .mul(100)
+        .round(2)
+        .rename("pct_%")
     )
 
     smote = SMOTE(random_state=42)
@@ -247,7 +305,11 @@ def evaluate_model(model: Any, X_test: Any, y_test: Any) -> Dict[str, float]:
     return metrics
 
 
-def run_all_models(df: pd.DataFrame) -> Dict[str, Any]:
+def run_all_models(
+    df: pd.DataFrame,
+    feature_columns: Optional[Sequence[str]] = None,
+    use_official_split: Optional[bool] = None,
+) -> Dict[str, Any]:
     """
     Run the full psychotherapy dropout prediction pipeline for three model families.
 
@@ -268,6 +330,10 @@ def run_all_models(df: pd.DataFrame) -> Dict[str, Any]:
     df : pd.DataFrame
         Full psychotherapy dataset with 'dropout' as the target and all
         relevant clinical features already prepared.
+    feature_columns : sequence of str, optional
+        Passed through to ``prepare_data``.
+    use_official_split : bool, optional
+        Passed through to ``prepare_data`` (DAIC-WOZ official train+dev vs test).
 
     Returns
     -------
@@ -277,7 +343,11 @@ def run_all_models(df: pd.DataFrame) -> Dict[str, Any]:
         - 'random_forest'
         - 'xgboost'
     """
-    X_train, X_test, y_train, y_test, _ = prepare_data(df)
+    X_train, X_test, y_train, y_test, _ = prepare_data(
+        df,
+        feature_columns=feature_columns,
+        use_official_split=use_official_split,
+    )
     X_train_res, y_train_res = apply_smote(X_train, y_train)
 
     model_types = ["logistic_regression", "random_forest", "xgboost"]
@@ -292,7 +362,9 @@ def run_all_models(df: pd.DataFrame) -> Dict[str, Any]:
         results[m_type] = metrics
 
     print("\nModel performance comparison (AUC-ROC, F1, Precision, Recall):")
-    header = f"{'Model':<20} {'AUC-ROC':>10} {'F1':>10} {'Precision':>12} {'Recall':>10}"
+    header = (
+        f"{'Model':<20} {'AUC-ROC':>10} {'F1':>10} {'Precision':>12} {'Recall':>10}"
+    )
     print(header)
     print("-" * len(header))
 
@@ -307,4 +379,3 @@ def run_all_models(df: pd.DataFrame) -> Dict[str, Any]:
         )
 
     return models
-

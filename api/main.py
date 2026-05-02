@@ -1,26 +1,32 @@
 import os
 import pickle
+import sys
 from contextlib import asynccontextmanager
 from typing import Any, Dict
 
+import pandas as pd
+import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
-from src.evaluate import compute_risk_score
-import uvicorn
 
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_APP_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.evaluate import compute_risk_score
 
 load_dotenv()
 
 
 class PatientSession(BaseModel):
     """
-    Session-level clinical and engagement information for a psychotherapy patient.
+    Session-level clinical and engagement features for synthetic dropout modeling.
 
-    These features capture current symptom severity (PHQ-9), treatment dose
-    (session number and frequency), attendance patterns, gaps between sessions,
-    mood, age, and the rate of change in depressive symptoms. Together, they
-    provide the model with a snapshot of dropout risk at this point in care.
+    These variables capture depression severity, treatment dose, attendance
+    regularity, spacing between sessions, mood, age, and short-term symptom
+    trajectory. They are used to infer early psychotherapy dropout risk.
     """
 
     phq9_score: int = Field(..., ge=0, le=27)
@@ -46,6 +52,43 @@ class PredictionResponse(BaseModel):
     risk_score: float = Field(..., ge=0.0, le=100.0)
     risk_tier: str
     message: str
+
+
+def compute_engineered_features(session: PatientSession) -> pd.DataFrame:
+    """
+    Build a one-row synthetic feature matrix with auto-computed engineered fields.
+
+    Derived fields:
+    - ``gap_increasing``: 1 when gap_between_sessions_days > 14 else 0
+    - ``max_attendance_streak``: int(attendance_consistency * session_number)
+    - ``phq9_change_rate_abs``: absolute PHQ-9 change rate
+
+    Parameters
+    ----------
+    session : PatientSession
+        Validated request body with synthetic pipeline predictors.
+
+    Returns
+    -------
+    pd.DataFrame
+        Single-row feature matrix ready for ``compute_risk_score``.
+    """
+    row: Dict[str, Any] = {
+        "phq9_score": session.phq9_score,
+        "session_number": session.session_number,
+        "session_frequency_per_month": session.session_frequency_per_month,
+        "attendance_consistency": session.attendance_consistency,
+        "gap_between_sessions_days": session.gap_between_sessions_days,
+        "mood_rating": session.mood_rating,
+        "age": session.age,
+        "phq9_change_rate": session.phq9_change_rate,
+        "gap_increasing": int(session.gap_between_sessions_days > 14),
+        "max_attendance_streak": int(
+            session.attendance_consistency * session.session_number
+        ),
+        "phq9_change_rate_abs": abs(session.phq9_change_rate),
+    }
+    return pd.DataFrame([row])
 
 
 def _build_plain_english_message(risk_score: float, risk_tier: str) -> str:
@@ -86,30 +129,29 @@ def _build_plain_english_message(risk_score: float, risk_tier: str) -> str:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> Any:
     """
     Application lifespan context for loading and managing the dropout model.
 
-    The model is loaded once at startup from a path specified in environment
-    variables, and stored on the application state. This avoids repeated disk
-    access and ensures that the API can quickly serve risk predictions for
-    psychotherapy sessions.
+    The model is loaded once at startup from ``DROPOUT_MODEL_PATH`` if set,
+    otherwise from a project-relative default in ``models/xgboost_model.pkl``.
     """
-    model_path = os.getenv("DROPOUT_MODEL_PATH")
     app.state.model = None
     app.state.model_loaded = False
 
-    if model_path:
-        try:
-            with open(model_path, "rb") as f:
-                app.state.model = pickle.load(f)
-            app.state.model_loaded = True
-        except FileNotFoundError:
-            app.state.model = None
-            app.state.model_loaded = False
-        except Exception:
-            app.state.model = None
-            app.state.model_loaded = False
+    model_path = os.getenv(
+        "DROPOUT_MODEL_PATH", os.path.join(_PROJECT_ROOT, "models", "xgboost_model.pkl")
+    )
+    try:
+        with open(model_path, "rb") as f:
+            app.state.model = pickle.load(f)
+        app.state.model_loaded = True
+    except FileNotFoundError:
+        app.state.model = None
+        app.state.model_loaded = False
+    except Exception:
+        app.state.model = None
+        app.state.model_loaded = False
 
     yield
 
@@ -121,8 +163,9 @@ app = FastAPI(
     title="Psychotherapy Dropout Risk API",
     version="1.0.0",
     description=(
-        "API for predicting early psychotherapy dropout risk based on session-level "
-        "clinical and engagement features. Intended for research and decision support only."
+        "API for predicting early psychotherapy dropout risk based on "
+        "synthetic clinically informed session features. Intended for "
+        "research and decision support only."
     ),
     lifespan=lifespan,
 )
@@ -133,13 +176,14 @@ async def root() -> Dict[str, Any]:
     """
     Root endpoint providing basic API metadata and model status.
 
-    Returns the API name, version, and a simple status flag, along with
-    whether the dropout prediction model has been successfully loaded into
-    memory. This is useful for quick connectivity checks.
+    Returns
+    -------
+    dict
+        API name, model version label, status flag, and model-loaded indicator.
     """
     return {
         "name": app.title,
-        "version": app.version,
+        "model_version": os.getenv("API_MODEL_VERSION", "Synthetic Clinical Data"),
         "status": "ok",
         "model_loaded": bool(getattr(app.state, "model_loaded", False)),
     }
@@ -153,6 +197,11 @@ async def health() -> Dict[str, Any]:
     Returns a simple health status string and an explicit boolean indicating
     whether the dropout prediction model is currently available. This can be
     integrated into monitoring or orchestration tools.
+
+    Returns
+    -------
+    dict
+        ``status`` and ``model_loaded`` fields.
     """
     model_loaded = bool(getattr(app.state, "model_loaded", False))
     return {
@@ -166,10 +215,24 @@ async def predict(session: PatientSession) -> PredictionResponse:
     """
     Predict early dropout risk for a single psychotherapy session.
 
-    This endpoint accepts session-level clinical features for a patient,
-    runs the dropout prediction model, and returns a probabilistic risk
-    score, a risk tier, and a brief plain-language explanation to support
-    collaborative decision making between clinicians and patients.
+    This endpoint accepts session-level clinical and engagement features,
+    computes derived risk markers, runs the prediction model, and returns
+    risk score, tier, and a plain-language explanation.
+
+    Parameters
+    ----------
+    session : PatientSession
+        Session-level inputs required for synthetic dropout risk modeling.
+
+    Returns
+    -------
+    PredictionResponse
+        ``risk_score``, ``risk_tier``, and ``message``.
+
+    Raises
+    ------
+    HTTPException
+        503 if the model is not loaded.
     """
     model = getattr(app.state, "model", None)
     model_loaded = bool(getattr(app.state, "model_loaded", False))
@@ -180,18 +243,7 @@ async def predict(session: PatientSession) -> PredictionResponse:
             detail="Prediction model is not loaded. Please try again later.",
         )
 
-    features = {
-        "phq9_score": session.phq9_score,
-        "session_number": session.session_number,
-        "session_frequency_per_month": session.session_frequency_per_month,
-        "attendance_consistency": session.attendance_consistency,
-        "gap_between_sessions_days": session.gap_between_sessions_days,
-        "mood_rating": session.mood_rating,
-        "age": session.age,
-        "phq9_change_rate": session.phq9_change_rate,
-    }
-    patient_df = __import__("pandas").DataFrame([features])
-
+    patient_df = compute_engineered_features(session)
     risk_result = compute_risk_score(model, patient_df)
     risk_score = float(risk_result["risk_score"])
     risk_tier = str(risk_result["risk_tier"])
@@ -211,4 +263,3 @@ if __name__ == "__main__":
         port=int(os.getenv("API_PORT", "8000")),
         reload=os.getenv("API_RELOAD", "false").lower() == "true",
     )
-
