@@ -11,6 +11,7 @@ low = pd.DataFrame([{
     'attendance_consistency': 0.95,
     'gap_between_sessions_days': 4,
     'mood_rating': 9,
+
     'age': 30,
     'phq9_change_rate': -1.8,
     'gap_increasing': 0,
@@ -31,21 +32,19 @@ high = pd.DataFrame([{
     'max_attendance_streak': 0,
     'phq9_change_rate_abs': 1.8
 }])
-
 moderate = pd.DataFrame([{
-    'phq9_score': 16,
-    'session_number': 8,
+    'phq9_score': 15,
+    'session_number': 5,
     'session_frequency_per_month': 3.0,
-    'attendance_consistency': 0.35,
-    'gap_between_sessions_days': 38,
-    'mood_rating': 4,
-    'age': 30,
+    'attendance_consistency': 0.40,
+    'gap_between_sessions_days': 25,
+    'mood_rating': 5,
+    'age': 35,
     'phq9_change_rate': 0.3,
     'gap_increasing': 1,
     'max_attendance_streak': 3,
     'phq9_change_rate_abs': 0.3
 }])
-
 print("LOW RISK:", compute_risk_score(model, low))
 print("HIGH RISK:", compute_risk_score(model, high))
 print("MODERATE:", compute_risk_score(model, moderate))

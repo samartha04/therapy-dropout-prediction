@@ -1,0 +1,4 @@
+Dropout Rate: 14.0%
+Correlation (Attendance vs Dropout): -0.281
+Correlation (PHQ9 vs Dropout): 0.229
+Correlation (Gap vs Dropout): 0.264
