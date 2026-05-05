@@ -131,14 +131,6 @@ therapy-dropout-prediction/
    streamlit run app/streamlit_app.py
    ```
 
----
-
-## ⚠️ Ethical Disclaimer
-
-This repository is purely a research prototype intended for educational and methodological exploration.
-**It is NOT a medical device, is NOT validated for clinical deployment, and MUST NOT be used as a standalone basis for diagnosis, treatment, or triage decisions.**
-
----
 
 ## 📚 References & Literature
 
